@@ -14,6 +14,10 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Evitar re-renders innecesarios
+if 'data_cache' not in st.session_state:
+    st.session_state.data_cache = None
+
 # Estilos CSS
 st.markdown("""
 <style>
@@ -187,13 +191,12 @@ with st.sidebar:
         label_visibility="collapsed"
     )
     
-    data = None
-    
     if data_source == "📄 CSV (Screaming Frog)":
         uploaded_file = st.file_uploader("Sube tu CSV", type=['csv'])
         if uploaded_file:
             data = load_csv_file(uploaded_file)
             if data is not None:
+                st.session_state.data_cache = data
                 st.success(f"✅ Cargadas {len(data)} URLs")
     else:
         sitemap_url = st.text_input("URL del Sitemap", placeholder="https://example.com/sitemap.xml")
@@ -202,8 +205,10 @@ with st.sidebar:
                 with st.spinner("Descargando sitemap..."):
                     urls = fetch_sitemap_urls(sitemap_url)
                     if urls:
-                        data = [{'Dirección': url} for url in urls]
+                        st.session_state.data_cache = [{'Dirección': url} for url in urls]
                         st.success(f"✅ Cargadas {len(urls)} URLs del sitemap")
+
+data = st.session_state.data_cache
 
 # Si hay datos cargados
 if data is not None and len(data) > 0:
