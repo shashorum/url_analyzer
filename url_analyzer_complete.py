@@ -55,7 +55,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Funciones auxiliares
-@st.cache_data
 def load_csv_file(file):
     """Cargar archivo CSV sin pandas"""
     try:
