@@ -6,6 +6,10 @@ from collections import defaultdict, OrderedDict
 import csv
 import io
 
+# Inicializar sesión ANTES que todo
+if 'data_cache' not in st.session_state:
+    st.session_state.data_cache = None
+
 # Configuración de página
 st.set_page_config(
     page_title="URL Directory Analyzer",
@@ -13,10 +17,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# Evitar re-renders innecesarios
-if 'data_cache' not in st.session_state:
-    st.session_state.data_cache = None
 
 # Estilos CSS
 st.markdown("""
@@ -44,22 +44,12 @@ st.markdown("""
         border-left: 4px solid #667eea;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    .metric-label {
-        font-size: 0.85rem;
-        color: #666;
-        margin-bottom: 0.5rem;
-        text-transform: uppercase;
-        font-weight: 600;
-    }
-    .metric-value {
-        font-size: 1.8rem;
-        font-weight: bold;
-        color: #333;
-    }
-    .metric-sublabel {
-        font-size: 0.75rem;
-        color: #999;
-        margin-top: 0.3rem;
+    .subdirectory-box {
+        background: #f0f2f6;
+        padding: 1rem;
+        border-radius: 6px;
+        margin: 0.5rem 0;
+        border-left: 3px solid #667eea;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -120,48 +110,41 @@ def get_subdomain(url):
     except:
         return None
 
-def build_directory_structure(data, filter_codes=None, subdomain_filter=None):
-    """Construir estructura de directorios"""
-    structure = defaultdict(list)
+def get_subdirectories(data, parent_dir):
+    """Obtener subdirectorios dentro de un directorio padre"""
+    subdirs = defaultdict(list)
     
     for row in data:
         url = row.get('Dirección', '')
-        if not url:
-            continue
-        
-        # Filtrar por código de respuesta
-        if filter_codes and len(filter_codes) > 0:
-            code = row.get('Código de respuesta', '')
-            if str(code) not in [str(c) for c in filter_codes]:
-                continue
-        
-        # Filtrar por subdominio
-        if subdomain_filter and subdomain_filter != "Todos":
-            current_subdomain = get_subdomain(url)
-            if current_subdomain != subdomain_filter:
-                continue
-        
         domain, path, parts = parse_url_structure(url)
-        if not domain or not path:
+        
+        if not parts:
             continue
         
-        if not parts or path == "/":
-            key = "/"
-        else:
-            key = f"/{parts[0]}"
+        # Obtener el primer nivel del path
+        first_level = f"/{parts[0]}"
         
-        structure[key].append(row)
+        # Si es el directorio padre y hay más niveles, añadir a subdirectorios
+        if first_level == parent_dir and len(parts) > 1:
+            subdir = f"/{parts[0]}/{parts[1]}"
+            subdirs[subdir].append(row)
+        elif first_level == parent_dir:
+            # URLs directas del directorio sin subdirectorios
+            subdirs['_direct'].append(row)
     
-    return structure
+    return subdirs
 
 def calculate_metrics(rows_list):
     """Calcular métricas agregadas"""
     if not rows_list:
         return {'urls': 0, 'sessions': 0, 'clics': 0, 'impresiones': 0}
     
-    sessions = sum(int(float(row.get('GA4 Sessions', 0) or 0)) for row in rows_list)
-    clics = sum(int(float(row.get('Clics', 0) or 0)) for row in rows_list)
-    impresiones = sum(int(float(row.get('Impresiones', 0) or 0)) for row in rows_list)
+    try:
+        sessions = sum(int(float(row.get('GA4 Sessions', 0) or 0)) for row in rows_list)
+        clics = sum(int(float(row.get('Clics', 0) or 0)) for row in rows_list)
+        impresiones = sum(int(float(row.get('Impresiones', 0) or 0)) for row in rows_list)
+    except:
+        sessions = clics = impresiones = 0
     
     return {'urls': len(rows_list), 'sessions': sessions, 'clics': clics, 'impresiones': impresiones}
 
@@ -215,15 +198,26 @@ if data is not None and len(data) > 0:
     
     # Sidebar - Filtros
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### 🔍 Filtros")
+    st.sidebar.markdown("### 🔍 Filtros Avanzados")
     
     # Filtro de subdominios
     subdomains = sorted(list(set(get_subdomain(row['Dirección']) for row in data if row.get('Dirección'))))
-    selected_subdomain = st.sidebar.selectbox("Subdominio", ["Todos"] + subdomains, key="subdomain_select")
+    main_domain = subdomains[0] if subdomains else "N/A"
+    selected_subdomain = st.sidebar.selectbox(
+        "Subdominio", 
+        [main_domain] + [s for s in subdomains if s != main_domain],
+        key="subdomain_select"
+    )
     
-    # Filtro de códigos de respuesta
+    # Filtro de códigos de respuesta (solo 200 por defecto)
     codes = sorted(list(set(str(row.get('Código de respuesta', '')) for row in data)))
-    selected_codes = st.sidebar.multiselect("Códigos de Respuesta", codes, default=codes, key="codes_select")
+    default_codes = ['200'] if '200' in codes else (codes[:1] if codes else [])
+    selected_codes = st.sidebar.multiselect(
+        "Códigos de Respuesta",
+        codes,
+        default=default_codes,
+        key="codes_select"
+    )
     
     # Aplicar filtros
     filtered_data = [row for row in data 
@@ -279,20 +273,29 @@ if data is not None and len(data) > 0:
         
         # Estructura de directorios
         st.markdown("### 📁 Estructura de Directorios")
-        structure = build_directory_structure(filtered_data)
+        
+        # Agrupar URLs por directorio principal
+        dir_structure = defaultdict(list)
+        for row in filtered_data:
+            url = row.get('Dirección', '')
+            domain, path, parts = parse_url_structure(url)
+            
+            if not parts or path == "/":
+                continue
+            
+            dir_key = f"/{parts[0]}"
+            dir_structure[dir_key].append(row)
         
         # Ordenar por sesiones
-        sorted_structure = OrderedDict(sorted(
-            structure.items(),
+        sorted_dirs = OrderedDict(sorted(
+            dir_structure.items(),
             key=lambda x: calculate_metrics(x[1])['sessions'],
             reverse=True
         ))
         
-        if "/" in sorted_structure:
-            del sorted_structure["/"]
-        
-        for directory, urls in sorted_structure.items():
+        for directory, urls in sorted_dirs.items():
             metrics = calculate_metrics(urls)
+            
             with st.expander(f"📁 {directory} ({metrics['urls']} URLs • {format_number(metrics['sessions'])} sesiones)"):
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
@@ -304,7 +307,24 @@ if data is not None and len(data) > 0:
                 with col4:
                     st.metric("Impresiones", metrics['impresiones'])
                 
-                st.dataframe(urls, use_container_width=True, hide_index=True)
+                # Obtener subdirectorios
+                subdirs = get_subdirectories(urls, directory)
+                
+                if '_direct' in subdirs:
+                    st.markdown("#### URLs directas")
+                    st.dataframe(subdirs['_direct'], use_container_width=True, hide_index=True)
+                
+                # Mostrar subdirectorios
+                for subdir in sorted(subdirs.keys()):
+                    if subdir != '_direct':
+                        subdir_urls = subdirs[subdir]
+                        subdir_metrics = calculate_metrics(subdir_urls)
+                        st.markdown(f"""
+                        <div class="subdirectory-box">
+                            <strong>{subdir}</strong> • {subdir_metrics['urls']} URLs • {format_number(subdir_metrics['sessions'])} sesiones
+                        </div>
+                        """, unsafe_allow_html=True)
+                        st.dataframe(subdir_urls, use_container_width=True, hide_index=True)
 
 else:
     st.info("Carga un CSV de Screaming Frog o un Sitemap XML para comenzar")
