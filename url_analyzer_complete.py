@@ -1,12 +1,10 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
 from urllib.parse import urlparse
 import requests
 from xml.etree import ElementTree as ET
 from collections import defaultdict, OrderedDict
+import csv
 import io
-import re
 
 # Configuración de página
 st.set_page_config(
@@ -59,40 +57,24 @@ st.markdown("""
         color: #999;
         margin-top: 0.3rem;
     }
-    .directory-item {
-        background: #f8f9fa;
-        padding: 1rem;
-        border-radius: 6px;
-        margin-bottom: 0.5rem;
-        border-left: 3px solid #667eea;
-    }
-    .url-table {
-        font-size: 0.9rem;
-    }
-    .code-200 { color: #10b981; font-weight: bold; }
-    .code-301 { color: #f59e0b; font-weight: bold; }
-    .code-410 { color: #ef4444; font-weight: bold; }
-    .status-badge {
-        display: inline-block;
-        padding: 0.25rem 0.75rem;
-        border-radius: 4px;
-        font-size: 0.75rem;
-        font-weight: 600;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 # Funciones auxiliares
 @st.cache_data
 def load_csv_file(file):
-    """Cargar archivo CSV de Screaming Frog"""
+    """Cargar archivo CSV sin pandas"""
     try:
-        df = pd.read_csv(file, encoding='utf-8-sig')
-        return df
+        content = file.read().decode('utf-8-sig')
+        reader = csv.DictReader(io.StringIO(content))
+        data = list(reader)
+        return data
     except:
         try:
-            df = pd.read_csv(file, encoding='latin-1')
-            return df
+            content = file.read().decode('latin-1')
+            reader = csv.DictReader(io.StringIO(content))
+            data = list(reader)
+            return data
         except Exception as e:
             st.error(f"Error al cargar el CSV: {str(e)}")
             return None
@@ -121,10 +103,7 @@ def parse_url_structure(url):
         parsed = urlparse(url)
         domain = f"{parsed.scheme}://{parsed.netloc}"
         path = parsed.path if parsed.path else "/"
-        
-        # Extraer partes del path
         parts = [p for p in path.split('/') if p]
-        
         return domain, path, parts
     except:
         return None, None, []
@@ -137,23 +116,20 @@ def get_subdomain(url):
     except:
         return None
 
-def build_directory_structure(df, filter_codes=None, subdomain_filter=None):
+def build_directory_structure(data, filter_codes=None, subdomain_filter=None):
     """Construir estructura de directorios"""
-    
-    if filter_codes and len(filter_codes) > 0:
-        df = df[df['Código de respuesta'].astype(str).isin([str(c) for c in filter_codes])]
-    
     structure = defaultdict(list)
     
-    for idx, row in df.iterrows():
+    for row in data:
         url = row.get('Dirección', '')
-        if not url or pd.isna(url):
+        if not url:
             continue
         
-        domain, path, parts = parse_url_structure(url)
-        
-        if not domain or not path:
-            continue
+        # Filtrar por código de respuesta
+        if filter_codes and len(filter_codes) > 0:
+            code = row.get('Código de respuesta', '')
+            if str(code) not in [str(c) for c in filter_codes]:
+                continue
         
         # Filtrar por subdominio
         if subdomain_filter and subdomain_filter != "Todos":
@@ -161,7 +137,10 @@ def build_directory_structure(df, filter_codes=None, subdomain_filter=None):
             if current_subdomain != subdomain_filter:
                 continue
         
-        # Categorizar por primer directorio
+        domain, path, parts = parse_url_structure(url)
+        if not domain or not path:
+            continue
+        
         if not parts or path == "/":
             key = "/"
         else:
@@ -174,25 +153,13 @@ def build_directory_structure(df, filter_codes=None, subdomain_filter=None):
 def calculate_metrics(rows_list):
     """Calcular métricas agregadas"""
     if not rows_list:
-        return {
-            'urls': 0,
-            'sessions': 0,
-            'clics': 0,
-            'impresiones': 0
-        }
+        return {'urls': 0, 'sessions': 0, 'clics': 0, 'impresiones': 0}
     
-    df = pd.DataFrame(rows_list)
+    sessions = sum(int(float(row.get('GA4 Sessions', 0) or 0)) for row in rows_list)
+    clics = sum(int(float(row.get('Clics', 0) or 0)) for row in rows_list)
+    impresiones = sum(int(float(row.get('Impresiones', 0) or 0)) for row in rows_list)
     
-    sessions = pd.to_numeric(df.get('GA4 Sessions', 0), errors='coerce').fillna(0).sum()
-    clics = pd.to_numeric(df.get('Clics', 0), errors='coerce').fillna(0).sum()
-    impresiones = pd.to_numeric(df.get('Impresiones', 0), errors='coerce').fillna(0).sum()
-    
-    return {
-        'urls': len(df),
-        'sessions': int(sessions),
-        'clics': int(clics),
-        'impresiones': int(impresiones)
-    }
+    return {'urls': len(rows_list), 'sessions': sessions, 'clics': clics, 'impresiones': impresiones}
 
 def format_number(num):
     """Formatear números grandes"""
@@ -220,68 +187,47 @@ with st.sidebar:
         label_visibility="collapsed"
     )
     
-    df = None
+    data = None
     
     if data_source == "📄 CSV (Screaming Frog)":
         uploaded_file = st.file_uploader("Sube tu CSV", type=['csv'])
         if uploaded_file:
-            df = load_csv_file(uploaded_file)
-            if df is not None:
-                st.success(f"✅ Cargadas {len(df)} URLs")
+            data = load_csv_file(uploaded_file)
+            if data is not None:
+                st.success(f"✅ Cargadas {len(data)} URLs")
     else:
-        sitemap_url = st.text_input(
-            "URL del Sitemap",
-            placeholder="https://example.com/sitemap.xml"
-        )
+        sitemap_url = st.text_input("URL del Sitemap", placeholder="https://example.com/sitemap.xml")
         if st.button("Obtener URLs", use_container_width=True):
             if sitemap_url:
                 with st.spinner("Descargando sitemap..."):
                     urls = fetch_sitemap_urls(sitemap_url)
                     if urls:
-                        df = pd.DataFrame({'Dirección': urls})
+                        data = [{'Dirección': url} for url in urls]
                         st.success(f"✅ Cargadas {len(urls)} URLs del sitemap")
 
 # Si hay datos cargados
-if df is not None and len(df) > 0:
+if data is not None and len(data) > 0:
     
     # Sidebar - Filtros
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔍 Filtros")
     
     # Filtro de subdominios
-    df['Subdominio'] = df['Dirección'].apply(get_subdomain)
-    subdomains = sorted([s for s in df['Subdominio'].unique() if s])
-    
-    selected_subdomain = st.sidebar.selectbox(
-        "Subdominio",
-        ["Todos"] + subdomains,
-        key="subdomain_select"
-    )
+    subdomains = sorted(list(set(get_subdomain(row['Dirección']) for row in data if row.get('Dirección'))))
+    selected_subdomain = st.sidebar.selectbox("Subdominio", ["Todos"] + subdomains, key="subdomain_select")
     
     # Filtro de códigos de respuesta
-    if 'Código de respuesta' in df.columns:
-        codes = sorted(df['Código de respuesta'].dropna().unique())
-        selected_codes = st.sidebar.multiselect(
-            "Códigos de Respuesta",
-            codes,
-            default=codes,
-            key="codes_select"
-        )
-    else:
-        selected_codes = None
+    codes = sorted(list(set(str(row.get('Código de respuesta', '')) for row in data)))
+    selected_codes = st.sidebar.multiselect("Códigos de Respuesta", codes, default=codes, key="codes_select")
     
     # Aplicar filtros
-    df_filtered = df.copy()
-    
-    if selected_codes:
-        df_filtered = df_filtered[df_filtered['Código de respuesta'].astype(str).isin([str(c) for c in selected_codes])]
-    
-    if selected_subdomain != "Todos":
-        df_filtered = df_filtered[df_filtered['Subdominio'] == selected_subdomain]
+    filtered_data = [row for row in data 
+                     if (not selected_codes or str(row.get('Código de respuesta', '')) in selected_codes)
+                     and (selected_subdomain == "Todos" or get_subdomain(row['Dirección']) == selected_subdomain)]
     
     # Header con dominio
-    if len(df_filtered) > 0:
-        domain_info = get_subdomain(df_filtered['Dirección'].iloc[0])
+    if len(filtered_data) > 0:
+        domain_info = get_subdomain(filtered_data[0]['Dirección'])
         st.markdown(f"""
         <div style="background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%); 
                     padding: 1.5rem; border-radius: 8px; color: white; margin-bottom: 2rem;">
@@ -292,61 +238,26 @@ if df is not None and len(df) > 0:
         
         # Métricas principales
         st.markdown("### 📊 Resumen General")
-        
-        general_metrics = calculate_metrics(df_filtered.to_dict('records'))
+        general_metrics = calculate_metrics(filtered_data)
         
         col1, col2, col3, col4 = st.columns(4)
-        
         with col1:
-            st.markdown("""
-            <div class="metric-box">
-                <div class="metric-label">Total URLs</div>
-                <div class="metric-value">""" + format_number(general_metrics['urls']) + """</div>
-                <div class="metric-sublabel">Analizadas</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
+            st.metric("Total URLs", format_number(general_metrics['urls']))
         with col2:
-            st.markdown("""
-            <div class="metric-box">
-                <div class="metric-label">Sesiones GA4</div>
-                <div class="metric-value">""" + format_number(general_metrics['sessions']) + """</div>
-                <div class="metric-sublabel">Total acumulado</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
+            st.metric("Sesiones GA4", format_number(general_metrics['sessions']))
         with col3:
-            st.markdown("""
-            <div class="metric-box">
-                <div class="metric-label">Clics GSC</div>
-                <div class="metric-value">""" + format_number(general_metrics['clics']) + """</div>
-                <div class="metric-sublabel">Search Console</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
+            st.metric("Clics GSC", format_number(general_metrics['clics']))
         with col4:
-            st.markdown("""
-            <div class="metric-box">
-                <div class="metric-label">Impresiones</div>
-                <div class="metric-value">""" + format_number(general_metrics['impresiones']) + """</div>
-                <div class="metric-sublabel">Search Console</div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.metric("Impresiones", format_number(general_metrics['impresiones']))
         
         st.markdown("---")
         
         # URLs en raíz
         st.markdown("### 🏠 URLs en Raíz del Dominio")
-        
-        root_urls = []
-        for idx, row in df_filtered.iterrows():
-            domain, path, parts = parse_url_structure(row['Dirección'])
-            if path == "/" or not parts:
-                root_urls.append(row)
+        root_urls = [row for row in filtered_data if parse_url_structure(row['Dirección'])[1] == "/"]
         
         if root_urls:
             root_metrics = calculate_metrics(root_urls)
-            
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("URLs en Raíz", root_metrics['urls'])
@@ -357,144 +268,38 @@ if df is not None and len(df) > 0:
             with col4:
                 st.metric("Impresiones", root_metrics['impresiones'])
             
-            # Tabla de URLs en raíz
-            root_df = pd.DataFrame(root_urls)
-            cols_to_show = ['Dirección', 'GA4 Sessions', 'Clics', 'Impresiones', 'H1-1']
-            cols_to_show = [c for c in cols_to_show if c in root_df.columns]
-            
-            if cols_to_show:
-                display_df = root_df[cols_to_show].copy()
-                display_df.columns = ['URL', 'Sesiones', 'Clics', 'Impresiones', 'H1']
-                
-                st.dataframe(display_df, use_container_width=True, hide_index=True)
-            
-            # Exportar URLs de raíz
-            csv_root = root_df.to_csv(index=False, encoding='utf-8-sig')
-            st.download_button(
-                label="📥 Descargar URLs de Raíz",
-                data=csv_root,
-                file_name="urls_root.csv",
-                mime="text/csv",
-                key="download_root"
-            )
+            st.dataframe(root_urls, use_container_width=True, hide_index=True)
         
         st.markdown("---")
         
         # Estructura de directorios
         st.markdown("### 📁 Estructura de Directorios")
-        st.markdown("Ordenados por sesiones de GA4")
-        
-        structure = build_directory_structure(
-            df_filtered,
-            filter_codes=selected_codes,
-            subdomain_filter=selected_subdomain if selected_subdomain != "Todos" else None
-        )
+        structure = build_directory_structure(filtered_data)
         
         # Ordenar por sesiones
-        sorted_structure = OrderedDict(
-            sorted(
-                structure.items(),
-                key=lambda x: calculate_metrics(x[1])['sessions'],
-                reverse=True
-            )
-        )
+        sorted_structure = OrderedDict(sorted(
+            structure.items(),
+            key=lambda x: calculate_metrics(x[1])['sessions'],
+            reverse=True
+        ))
         
-        # Eliminar raíz si existe
         if "/" in sorted_structure:
             del sorted_structure["/"]
         
-        # Mostrar directorios
         for directory, urls in sorted_structure.items():
             metrics = calculate_metrics(urls)
-            
-            with st.expander(
-                f"📁 {directory} ({metrics['urls']} URLs • {format_number(metrics['sessions'])} sesiones)",
-                expanded=False
-            ):
-                # Métricas del directorio
+            with st.expander(f"📁 {directory} ({metrics['urls']} URLs • {format_number(metrics['sessions'])} sesiones)"):
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     st.metric("URLs", metrics['urls'])
                 with col2:
-                    st.metric("Sesiones GA4", metrics['sessions'])
+                    st.metric("Sesiones", metrics['sessions'])
                 with col3:
                     st.metric("Clics", metrics['clics'])
                 with col4:
                     st.metric("Impresiones", metrics['impresiones'])
                 
-                # Tabla de URLs
-                st.markdown(f"**URLs en {directory}:**")
-                
-                urls_df = pd.DataFrame(urls)
-                cols_to_show = ['Dirección', 'GA4 Sessions', 'Clics', 'Impresiones', 'Código de respuesta', 'H1-1']
-                cols_to_show = [c for c in cols_to_show if c in urls_df.columns]
-                
-                if cols_to_show:
-                    display_df = urls_df[cols_to_show].copy()
-                    display_df.columns = ['URL', 'Sesiones', 'Clics', 'Impresiones', 'Código', 'H1']
-                    
-                    st.dataframe(display_df, use_container_width=True, hide_index=True)
-                
-                # Exportar URLs del directorio
-                csv_dir = urls_df.to_csv(index=False, encoding='utf-8-sig')
-                st.download_button(
-                    label=f"📥 Descargar URLs de {directory}",
-                    data=csv_dir,
-                    file_name=f"urls_{directory.replace('/', '_').strip('_')}.csv",
-                    mime="text/csv",
-                    key=f"download_{directory}"
-                )
-        
-        st.markdown("---")
-        
-        # Tabla detallada
-        with st.expander("📋 Ver Todas las URLs Filtradas", expanded=False):
-            cols_to_show = ['Dirección', 'GA4 Sessions', 'GA4 Views', 'Clics', 'Impresiones', 'Código de respuesta', 'H1-1']
-            cols_to_show = [c for c in cols_to_show if c in df_filtered.columns]
-            
-            if cols_to_show:
-                display_all = df_filtered[cols_to_show].copy()
-                st.dataframe(display_all, use_container_width=True, hide_index=True)
-            
-            # Exportar todas las URLs
-            csv_all = df_filtered.to_csv(index=False, encoding='utf-8-sig')
-            st.download_button(
-                label="📥 Descargar Todas las URLs",
-                data=csv_all,
-                file_name="urls_completas.csv",
-                mime="text/csv",
-                key="download_all"
-            )
+                st.dataframe(urls, use_container_width=True, hide_index=True)
 
 else:
-    # Mensaje inicial
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown("""
-        ### 📄 Archivo CSV
-        Exporta desde Screaming Frog:
-        1. Internal HTML
-        2. Selecciona todas
-        3. Click derecho → Export
-        4. Formato: CSV
-        """)
-    
-    with col2:
-        st.markdown("""
-        ### 🌐 Sitemap XML
-        O usa un sitemap XML:
-        1. Encuentra tu sitemap.xml
-        2. Introduce la URL
-        3. Haz click en obtener URLs
-        """)
-    
-    with col3:
-        st.markdown("""
-        ### ✨ Características
-        - 🏗️ Estructura jerárquica
-        - 📊 Métricas de GA4/GSC
-        - 🏷️ Múltiples subdominios
-        - 📥 Exportar a CSV
-        - 🔍 Filtros avanzados
-        """)
+    st.info("Carga un CSV de Screaming Frog o un Sitemap XML para comenzar")
